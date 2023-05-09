@@ -1,0 +1,3 @@
+[submodule "egg"]
+	path = egg
+	url = git@github.com:egraphs-good/egg.git

@@ -1,5 +1,9 @@
 project(OMCompiler_3rdParty)
 
+# Enable ExternalProject CMake module
+include(ExternalProject)
+include(FetchContent)
+
 # ryu
 omc_add_subdirectory(ryu)
 add_library(omc::3rd::ryu ALIAS ryu)
@@ -20,11 +24,21 @@ add_library(omc::3rd::cdaskr ALIAS cdaskr)
 omc_add_subdirectory(CMinpack)
 add_library(omc::3rd::cminpack ALIAS cminpack)
 
-
 # # cppzmq
 # omc_add_subdirectory(cppzmq)
 
+# corrosion
+# needed to import rust crates
+FetchContent_Declare(
+    Corrosion
+    GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git)
+FetchContent_MakeAvailable(Corrosion)
 
+# egg
+corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/OMCompiler/3rdParty/egg/Cargo.toml)
+add_library(omc::3rd::egg ALIAS egg)
+corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/OMCompiler/3rdParty/egg_interface/Cargo.toml)
+add_library(omc::3rd::egg_interface ALIAS egg_interface)
 
 # FMIL
 set (FMILIB_GENERATE_DOXYGEN_DOC OFF CACHE BOOL "Generate doxygen doc target")
