@@ -1,7 +1,7 @@
 use std::ffi::{c_void, CStr};
 use std::os::raw::c_char;
 use std::slice;
-
+use std::time::Instant;
 use egg::*;
 
 define_language! {
@@ -18,35 +18,71 @@ define_language! {
     }
 }
 
+/// make the vector of rewrite rules
+/// TODO read this from a file, read only once
 fn make_rules() -> Vec<Rewrite<SimpleLanguage, ()>> {
+    println!("making rules");
     vec![
         rewrite!("commute-add"; "(+ ?a ?b)" => "(+ ?b ?a)"),
+        rewrite!("associate-add"; "(+ (+ ?a ?b) ?c)" => "(+ ?a (+ ?b ?c))"),
+
+        rewrite!("associate-sub"; "(+ ?a (- ?b ?c))" => "(- (+ ?a ?b) ?c)"),
+
         rewrite!("commute-mul"; "(* ?a ?b)" => "(* ?b ?a)"),
+        rewrite!("associate-mul"; "(* (* ?a ?b) ?c)" => "(* ?a (* ?b ?c))"),
+
+        rewrite!("distribute"; "(+ (* ?a ?b) (* ?a ?c))" => "(* ?a (+ ?b ?c))"),
+
+        rewrite!("add-same"; "(+ ?a ?a)" => "(* ?a 2)"),
+        rewrite!("add-same3"; "(+ (+ ?a ?a) ?a)" => "(* ?a 3)"),
+
         rewrite!("add-0"; "(+ ?a 0)" => "?a"),
         rewrite!("sub-inv"; "(- ?a ?a)" => "0"),
         rewrite!("mul-0"; "(* ?a 0)" => "0"),
         rewrite!("mul-1"; "(* ?a 1)" => "?a"),
+
+        //rewrite!("binomial-1"; "" => ""),
+
         rewrite!("sin-0"; "(sin 0)" => "0"),
     ]
 }
 
 /// parse an expression, simplify it using egg, and pretty print it back out
-fn simplify(s: &str) -> String {
+fn simplify(s: &str, rules: &Vec<Rewrite<SimpleLanguage, ()>>) {
+    let mut times = Vec::new();
+
     // parse the expression, the type annotation tells it which Language to use
+    let now = Instant::now();
     let expr: RecExpr<SimpleLanguage> = s.parse().unwrap();
+    times.push((now.elapsed(), "expr     "));
+
+    let now = Instant::now();
+    let cost = AstSize.cost_rec(&expr);
+    times.push((now.elapsed(), "cost     "));
 
     // simplify the expression using a Runner, which creates an e-graph with
     // the given expression and runs the given rules over it
-    let runner = Runner::default().with_expr(&expr).run(&make_rules());
+    let now = Instant::now();
+    let runner = Runner::default().with_expr(&expr).run(rules);
+    times.push((now.elapsed(), "runner   "));
 
     // the Runner knows which e-class the expression given with `with_expr` is in
+    let now = Instant::now();
     let root = runner.roots[0];
+    times.push((now.elapsed(), "root     "));
 
     // use an Extractor to pick the best element of the root eclass
+    let now = Instant::now();
     let extractor = Extractor::new(&runner.egraph, AstSize);
+    times.push((now.elapsed(), "extractor"));
+
+    let now = Instant::now();
     let (best_cost, best) = extractor.find_best(root);
-    println!("Simplified {} to {} with cost {}", expr, best, best_cost);
-    best.to_string()
+    times.push((now.elapsed(), "best     "));
+
+    times.sort_by(|(a,_), (b,_)| b.cmp(a));
+    println!("{}", times.iter().fold(String::new(), |acc, (t,s)| acc + &format!("{}\t{:.2?}", s, t) + "\n"));
+    println!("Simplified {} with cost {}\nto         {} with cost {}", expr, cost, best, best_cost);
 }
 
 #[test]
@@ -58,17 +94,29 @@ fn simple_tests() {
 /* OMC INTERFACE */
 
 #[no_mangle]
-pub extern "C" fn rust_parse_equation(eq_str: *const c_char, comment: *const c_char) -> *mut c_char {
-    let s = unsafe { CStr::from_ptr(eq_str).to_string_lossy().into_owned() };
-    let cs = unsafe { CStr::from_ptr(comment).to_string_lossy().into_owned() };
-    //println!("Rust: {:?} = {:?}", cs, s);
-    //println!("  = {:?}", simplify(&s));
-    simplify(&s).as_ptr()
+pub extern "C" fn egg_simplify_equation(lhs_str: *const c_char, rhs_str: *const c_char) {
+    let lhs = unsafe { CStr::from_ptr(lhs_str).to_string_lossy().into_owned() };
+    let rhs = unsafe { CStr::from_ptr(rhs_str).to_string_lossy().into_owned() };
+    let now = Instant::now();
+    let rules = make_rules();
+    let elapsed = now.elapsed();
+    println!("rules:   {:.2?}", elapsed);
+    simplify(&lhs, &rules);
+    simplify(&rhs, &rules);
 }
 
-/* useful functions between Rust and C */
+#[no_mangle]
+pub extern "C" fn egg_rules(data: *mut c_void) -> Vec<Rewrite<SimpleLanguage, ()>> {
+    let rules = unsafe { &mut *(data as *mut Vec<Rewrite<SimpleLanguage, ()>>) };
+    rules.to_vec()
+}
 
-/*
+
+/*---------------------------------------------------------------------------------------*/
+/* useful functions between Rust and C */
+/*---------------------------------------------------------------------------------------*/
+
+
 // A Rust struct mapping the C struct
 #[repr(C)]
 #[derive(Debug)]
@@ -156,4 +204,3 @@ pub unsafe extern "C" fn rust_cstruct(c_struct: *mut RustStruct) {
         rust_struct.c, rust_struct.ul, s
     );
 }
-*/
