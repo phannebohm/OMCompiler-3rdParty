@@ -10,3 +10,5 @@ crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
 egg = "0.9.3"
+num-traits = "0.2.18"
+ordered-float = "4.2.0"
