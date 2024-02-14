@@ -92,11 +92,11 @@ fn simplify(s: &str, rules: &RuleSet) {
     let (best_cost, best) = extractor.find_best(root);
     times.push((now.elapsed(), "best     "));
 
-    times.sort_by(|(a,_), (b,_)| b.cmp(a));
-    print!("{}", times.iter().fold(String::new(), |acc, (t,s)| acc + &format!("{}\t{:.2?}", s, t) + "\n"));
     println!("### EGG | cost {} -> {} ###", cost, best_cost);
     println!("[BEFORE] {}", expr);
     println!("[AFTER ] {}", best);
+    times.sort_by(|(a,_), (b,_)| b.cmp(a));
+    print!("{}", times.iter().fold(String::new(), |acc, (t,s)| acc + &format!("{}\t{:.2?}", s, t) + "\n"));
 }
 
 #[test]
