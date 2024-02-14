@@ -1,12 +1,20 @@
 use std::ffi::{c_void, CStr};
 use std::os::raw::c_char;
 use std::slice;
+use std::time::Duration;
 use std::time::Instant;
 use egg::*;
+use ordered_float::NotNan;
+use num_traits::Pow;
+
+pub type Rewrite = egg::Rewrite<ModelicaExpr, ConstantFold>;
+pub type RuleSet = Vec<Rewrite>;
+pub type Constant = NotNan<f64>;
 
 define_language! {
-    enum SimpleLanguage {
-        Num(i32),
+    pub enum ModelicaExpr {
+        Symbol(Symbol),
+        Constant(Constant),
         "+" = Add([Id; 2]),
         "-" = Sub([Id; 2]),
         "*" = Mul([Id; 2]),
@@ -14,46 +22,47 @@ define_language! {
         "^" = Pow([Id; 2]),
         "der" = Der(Id),
         "sin" = Sin(Id),
-        Symbol(Symbol),
     }
 }
 
-/// make the vector of rewrite rules
-/// TODO read this from a file, read only once
-fn make_rules() -> Vec<Rewrite<SimpleLanguage, ()>> {
-    println!("making rules");
-    vec![
-        rewrite!("commute-add"; "(+ ?a ?b)" => "(+ ?b ?a)"),
-        rewrite!("associate-add"; "(+ (+ ?a ?b) ?c)" => "(+ ?a (+ ?b ?c))"),
+#[derive(Default)]
+pub struct ConstantFold;
+impl Analysis<ModelicaExpr> for ConstantFold {
+    type Data = Option<Constant>;
 
-        rewrite!("associate-sub"; "(+ ?a (- ?b ?c))" => "(- (+ ?a ?b) ?c)"),
+    fn merge(&mut self, to: &mut Self::Data, from: Self::Data) -> DidMerge {
+        egg::merge_max(to, from)
+    }
 
-        rewrite!("commute-mul"; "(* ?a ?b)" => "(* ?b ?a)"),
-        rewrite!("associate-mul"; "(* (* ?a ?b) ?c)" => "(* ?a (* ?b ?c))"),
+    fn make(egraph: &EGraph<ModelicaExpr, Self>, enode: &ModelicaExpr) -> Self::Data {
+        let x = |i: &Id| egraph[*i].data;
+        match enode {
+            ModelicaExpr::Constant(n) => Some(*n),
+            ModelicaExpr::Add([a, b]) => Some(x(a)? + x(b)?),
+            ModelicaExpr::Sub([a, b]) => Some(x(a)? - x(b)?),
+            ModelicaExpr::Mul([a, b]) => Some(x(a)? * x(b)?),
+            ModelicaExpr::Div([a, b]) if x(b) != Some(NotNan::new(0.0).unwrap()) => Some(x(a)? / x(b)?),
+            ModelicaExpr::Pow([a, b]) => Some(Pow::pow(x(a)?, x(b)?)),
+            _ => None,
+        }
+    }
 
-        rewrite!("distribute"; "(+ (* ?a ?b) (* ?a ?c))" => "(* ?a (+ ?b ?c))"),
-
-        rewrite!("add-same"; "(+ ?a ?a)" => "(* ?a 2)"),
-        rewrite!("add-same3"; "(+ (+ ?a ?a) ?a)" => "(* ?a 3)"),
-
-        rewrite!("add-0"; "(+ ?a 0)" => "?a"),
-        rewrite!("sub-inv"; "(- ?a ?a)" => "0"),
-        rewrite!("mul-0"; "(* ?a 0)" => "0"),
-        rewrite!("mul-1"; "(* ?a 1)" => "?a"),
-
-        //rewrite!("binomial-1"; "" => ""),
-
-        rewrite!("sin-0"; "(sin 0)" => "0"),
-    ]
+    fn modify(egraph: &mut EGraph<ModelicaExpr, Self>, id: Id) {
+        if let Some(i) = egraph[id].data {
+            let added = egraph.add(ModelicaExpr::Constant(i));
+            egraph.union(id, added);
+        }
+    }
 }
 
+
 /// parse an expression, simplify it using egg, and pretty print it back out
-fn simplify(s: &str, rules: &Vec<Rewrite<SimpleLanguage, ()>>) {
+fn simplify(s: &str, rules: &RuleSet) {
     let mut times = Vec::new();
 
     // parse the expression, the type annotation tells it which Language to use
     let now = Instant::now();
-    let expr: RecExpr<SimpleLanguage> = s.parse().unwrap();
+    let expr: RecExpr<ModelicaExpr> = s.parse().unwrap();
     times.push((now.elapsed(), "expr     "));
 
     let now = Instant::now();
@@ -63,7 +72,10 @@ fn simplify(s: &str, rules: &Vec<Rewrite<SimpleLanguage, ()>>) {
     // simplify the expression using a Runner, which creates an e-graph with
     // the given expression and runs the given rules over it
     let now = Instant::now();
-    let runner = Runner::default().with_expr(&expr).run(rules);
+    let runner1 = Runner::<ModelicaExpr, ConstantFold, ()>::default()
+        .with_time_limit(Duration::from_millis(500));
+    //println!("{:?}", runner1);
+    let runner = runner1.with_expr(&expr).run(rules);
     times.push((now.elapsed(), "runner   "));
 
     // the Runner knows which e-class the expression given with `with_expr` is in
@@ -81,8 +93,10 @@ fn simplify(s: &str, rules: &Vec<Rewrite<SimpleLanguage, ()>>) {
     times.push((now.elapsed(), "best     "));
 
     times.sort_by(|(a,_), (b,_)| b.cmp(a));
-    println!("{}", times.iter().fold(String::new(), |acc, (t,s)| acc + &format!("{}\t{:.2?}", s, t) + "\n"));
-    println!("Simplified {} with cost {}\nto         {} with cost {}", expr, cost, best, best_cost);
+    print!("{}", times.iter().fold(String::new(), |acc, (t,s)| acc + &format!("{}\t{:.2?}", s, t) + "\n"));
+    println!("### EGG | cost {} -> {} ###", cost, best_cost);
+    println!("[BEFORE] {}", expr);
+    println!("[AFTER ] {}", best);
 }
 
 #[test]
@@ -93,28 +107,61 @@ fn simple_tests() {
 
 /* OMC INTERFACE */
 
+/// make the vector of rewrite rules
 #[no_mangle]
-pub extern "C" fn egg_simplify_equation(lhs_str: *const c_char, rhs_str: *const c_char) {
-    let lhs = unsafe { CStr::from_ptr(lhs_str).to_string_lossy().into_owned() };
-    let rhs = unsafe { CStr::from_ptr(rhs_str).to_string_lossy().into_owned() };
+pub extern "C" fn egg_make_rules() -> Box<RuleSet> {
     let now = Instant::now();
-    let rules = make_rules();
+    let rules: RuleSet = vec![
+        rewrite!("add-const-1-2";   "(+ 3.0 5.0)" => "8.0"),
+        rewrite!("add-commute";   "(+ ?a ?b)" => "(+ ?b ?a)"),
+        rewrite!("add-associate"; "(+ (+ ?a ?b) ?c)" => "(+ ?a (+ ?b ?c))"),
+        rewrite!("add-neutral";   "(+ ?a 0)" => "?a"),
+        rewrite!("add-inverse";   "(- ?a ?a)" => "0"),
+
+        rewrite!("sub-associate"; "(+ ?a (- ?b ?c))" => "(- (+ ?a ?b) ?c)"),
+
+        rewrite!("mul-commute"; "(* ?a ?b)" => "(* ?b ?a)"),
+        rewrite!("mul-associate"; "(* (* ?a ?b) ?c)" => "(* ?a (* ?b ?c))"),
+        rewrite!("mul-1"; "(* ?a 1)" => "?a"),
+
+        rewrite!("div-associate"; "(* ?a (/ ?b ?c))" => "(/ (* ?a ?b) ?c)"),
+        rewrite!("div-inv"; "(/ ?a ?a)" => "1"),
+
+        rewrite!("add-mul-distribute"; "(+ (* ?a ?b) (* ?a ?c))" => "(* ?a (+ ?b ?c))"),
+        rewrite!("mul-0"; "(* ?a 0)" => "0"),
+
+        rewrite!("add-same-base"; "(+ ?a ?a)" => "(* ?a 2)"),
+        rewrite!("add-same"; "(+ ?a (* ?a ?n))" => "(* ?a (+ ?n 1))"),
+
+        rewrite!("mul-same-base"; "(* ?a ?a)" => "(^ ?a 2)"),
+        rewrite!("mul-same"; "(* ?a (^ ?a ?n))" => "(^ ?a (+ ?n 1))"),
+
+        rewrite!("pow-distribute"; "(^ (* ?a ?b) ?n)" => "(* (^ ?a ?n) (^ ?b ?n))"),
+
+        rewrite!("sin-0"; "(sin 0)" => "0"),
+    ];
     let elapsed = now.elapsed();
-    println!("rules:   {:.2?}", elapsed);
-    simplify(&lhs, &rules);
-    simplify(&rhs, &rules);
+    println!("made rules: {:.2?}", elapsed);
+    Box::new(rules)
 }
 
 #[no_mangle]
-pub extern "C" fn egg_rules(data: *mut c_void) -> Vec<Rewrite<SimpleLanguage, ()>> {
-    let rules = unsafe { &mut *(data as *mut Vec<Rewrite<SimpleLanguage, ()>>) };
-    rules.to_vec()
+pub unsafe extern "C" fn egg_free_rules(_rules: Option<Box<RuleSet>>) {
+    // dropped implicitly
+    println!("dropped rules");
+}
+
+#[no_mangle]
+pub extern "C" fn egg_simplify_expr(rules: Option<&mut RuleSet>, expr_str: *const c_char) {
+    let expr = unsafe { CStr::from_ptr(expr_str).to_string_lossy().into_owned() };
+    let rules = rules.unwrap();
+    simplify(&expr, rules);
 }
 
 
-/*---------------------------------------------------------------------------------------*/
+/*----------------------------------------------------------------------------*/
 /* useful functions between Rust and C */
-/*---------------------------------------------------------------------------------------*/
+/*----------------------------------------------------------------------------*/
 
 
 // A Rust struct mapping the C struct
