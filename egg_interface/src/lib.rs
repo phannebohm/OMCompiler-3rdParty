@@ -7,8 +7,8 @@ use egg::*;
 use ordered_float::NotNan;
 use num_traits::Pow;
 
-pub type Rewrite = egg::Rewrite<ModelicaExpr, ConstantFold>;
-pub type RuleSet = Vec<Rewrite>;
+pub type RuleSet = Vec<egg::Rewrite<ModelicaExpr, ConstantFold>>;
+pub type Runner = egg::Runner::<ModelicaExpr, ConstantFold, ()>;
 pub type Constant = NotNan<f64>;
 
 define_language! {
@@ -53,56 +53,6 @@ impl Analysis<ModelicaExpr> for ConstantFold {
             egraph.union(id, added);
         }
     }
-}
-
-
-/// parse an expression, simplify it using egg, and pretty print it back out
-fn simplify(s: &str, rules: &RuleSet) {
-    let mut times = Vec::new();
-
-    // parse the expression, the type annotation tells it which Language to use
-    let now = Instant::now();
-    let expr: RecExpr<ModelicaExpr> = s.parse().unwrap();
-    times.push((now.elapsed(), "expr     "));
-
-    let now = Instant::now();
-    let cost = AstSize.cost_rec(&expr);
-    times.push((now.elapsed(), "cost     "));
-
-    // simplify the expression using a Runner, which creates an e-graph with
-    // the given expression and runs the given rules over it
-    let now = Instant::now();
-    let runner1 = Runner::<ModelicaExpr, ConstantFold, ()>::default()
-        .with_time_limit(Duration::from_millis(500));
-    //println!("{:?}", runner1);
-    let runner = runner1.with_expr(&expr).run(rules);
-    times.push((now.elapsed(), "runner   "));
-
-    // the Runner knows which e-class the expression given with `with_expr` is in
-    let now = Instant::now();
-    let root = runner.roots[0];
-    times.push((now.elapsed(), "root     "));
-
-    // use an Extractor to pick the best element of the root eclass
-    let now = Instant::now();
-    let extractor = Extractor::new(&runner.egraph, AstSize);
-    times.push((now.elapsed(), "extractor"));
-
-    let now = Instant::now();
-    let (best_cost, best) = extractor.find_best(root);
-    times.push((now.elapsed(), "best     "));
-
-    println!("### EGG | cost {} -> {} ###", cost, best_cost);
-    println!("[BEFORE] {}", expr);
-    println!("[AFTER ] {}", best);
-    times.sort_by(|(a,_), (b,_)| b.cmp(a));
-    print!("{}", times.iter().fold(String::new(), |acc, (t,s)| acc + &format!("{}\t{:.2?}", s, t) + "\n"));
-}
-
-#[test]
-fn simple_tests() {
-    assert_eq!(simplify("(* 0 42)"), "0");
-    assert_eq!(simplify("(+ 0 (* 1 foo))"), "foo");
 }
 
 /* OMC INTERFACE */
@@ -151,11 +101,69 @@ pub unsafe extern "C" fn egg_free_rules(_rules: Option<Box<RuleSet>>) {
     println!("dropped rules");
 }
 
+/// make the runner
 #[no_mangle]
-pub extern "C" fn egg_simplify_expr(rules: Option<&mut RuleSet>, expr_str: *const c_char) {
+pub extern "C" fn egg_make_runner() -> Box<Runner> {
+  let now = Instant::now();
+  let runner = Runner::default()
+    // we can load a saturated egraph here
+    .with_time_limit(Duration::from_millis(500));
+  let elapsed = now.elapsed();
+  println!("made runner: {:.2?}", elapsed);
+  Box::new(runner)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn egg_free_runner(_runner: Option<Box<Runner>>) {
+    // dropped implicitly
+    println!("dropped runner");
+}
+
+#[no_mangle]
+pub extern "C" fn egg_simplify_expr(rules: Option<&RuleSet>, runner: Option<&mut Runner>, expr_str: *const c_char) {
+    let mut times = Vec::new();
+
+    // parse the expression, the type annotation tells it which Language to use
+    let now = Instant::now();
     let expr = unsafe { CStr::from_ptr(expr_str).to_string_lossy().into_owned() };
+    let expr: RecExpr<ModelicaExpr> = expr.parse().unwrap();
+    times.push((now.elapsed(), "expr     "));
+
+    let now = Instant::now();
+    let cost = AstSize.cost_rec(&expr);
+    times.push((now.elapsed(), "cost     "));
+
+    // simplify the expression using a Runner, which creates an e-graph with
+    // the given expression and runs the given rules over it
+    //println!("{:?}", runner0);
+    let now = Instant::now();
     let rules = rules.unwrap();
-    simplify(&expr, rules);
+    let runner = runner.unwrap();
+    let runner = Runner::default()
+    .with_time_limit(Duration::from_millis(500))
+    .with_expr(&expr).run(rules);
+    times.push((now.elapsed(), "runner   "));
+    //println!("{:?}", runner);
+
+    // the Runner knows which e-class the expression given with `with_expr` is in
+    let now = Instant::now();
+    let root = runner.roots[0];
+    times.push((now.elapsed(), "root     "));
+
+    // use an Extractor to pick the best element of the root eclass
+    let now = Instant::now();
+    let extractor = Extractor::new(&runner.egraph, AstSize);
+    times.push((now.elapsed(), "extractor"));
+
+    let now = Instant::now();
+    let (best_cost, best) = extractor.find_best(root);
+    times.push((now.elapsed(), "best     "));
+
+    println!("### EGG | cost {} -> {} ###", cost, best_cost);
+    println!("[BEFORE] {}", expr);
+    println!("[AFTER ] {}", best);
+    times.sort_by(|(a,_), (b,_)| b.cmp(a));
+    print!("{}", times.iter().fold(String::new(), |acc, (t,s)| acc + &format!("{}\t{:.2?}", s, t) + "\n"));
 }
 
 
