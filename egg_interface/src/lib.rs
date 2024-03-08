@@ -1,4 +1,4 @@
-use std::ffi::{c_void, CStr};
+use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
 use std::slice;
 use std::time::Duration;
@@ -7,6 +7,7 @@ use egg::*;
 use ordered_float::NotNan;
 use num_traits::Pow;
 
+pub type EGraph = egg::EGraph<ModelicaExpr, ConstantFold>;
 pub type RuleSet = Vec<egg::Rewrite<ModelicaExpr, ConstantFold>>;
 pub type Runner = egg::Runner::<ModelicaExpr, ConstantFold, ()>;
 pub type Constant = NotNan<f64>;
@@ -34,23 +35,25 @@ impl Analysis<ModelicaExpr> for ConstantFold {
         egg::merge_max(to, from)
     }
 
-    fn make(egraph: &EGraph<ModelicaExpr, Self>, enode: &ModelicaExpr) -> Self::Data {
+    fn make(egraph: &EGraph, enode: &ModelicaExpr) -> Self::Data {
         let x = |i: &Id| egraph[*i].data;
-        match enode {
-            ModelicaExpr::Constant(n) => Some(*n),
-            ModelicaExpr::Add([a, b]) => Some(x(a)? + x(b)?),
-            ModelicaExpr::Sub([a, b]) => Some(x(a)? - x(b)?),
-            ModelicaExpr::Mul([a, b]) => Some(x(a)? * x(b)?),
-            ModelicaExpr::Div([a, b]) if x(b) != Some(NotNan::new(0.0).unwrap()) => Some(x(a)? / x(b)?),
-            ModelicaExpr::Pow([a, b]) => Some(Pow::pow(x(a)?, x(b)?)),
-            _ => None,
-        }
+        Some(match enode {
+            ModelicaExpr::Constant(n) => *n,
+            ModelicaExpr::Add([a, b]) => x(a)? + x(b)?,
+            ModelicaExpr::Sub([a, b]) => x(a)? - x(b)?,
+            ModelicaExpr::Mul([a, b]) => x(a)? * x(b)?,
+            ModelicaExpr::Div([a, b]) if x(b) != Some(NotNan::new(0.0).unwrap()) => x(a)? / x(b)?,
+            ModelicaExpr::Pow([a, b]) => Pow::pow(x(a)?, x(b)?),
+            _ => return None,
+        })
     }
 
-    fn modify(egraph: &mut EGraph<ModelicaExpr, Self>, id: Id) {
+    fn modify(egraph: &mut EGraph, id: Id) {
         if let Some(i) = egraph[id].data {
             let added = egraph.add(ModelicaExpr::Constant(i));
             egraph.union(id, added);
+            // to not prune, comment this out
+            //egraph[id].nodes.retain(|n| n.is_leaf());
         }
     }
 }
@@ -62,7 +65,6 @@ impl Analysis<ModelicaExpr> for ConstantFold {
 pub extern "C" fn egg_make_rules() -> Box<RuleSet> {
     let now = Instant::now();
     let rules: RuleSet = vec![
-        rewrite!("add-const-1-2";   "(+ 3.0 5.0)" => "8.0"),
         rewrite!("add-commute";   "(+ ?a ?b)" => "(+ ?b ?a)"),
         rewrite!("add-associate"; "(+ (+ ?a ?b) ?c)" => "(+ ?a (+ ?b ?c))"),
         rewrite!("add-neutral";   "(+ ?a 0)" => "?a"),
@@ -74,7 +76,7 @@ pub extern "C" fn egg_make_rules() -> Box<RuleSet> {
         rewrite!("mul-associate"; "(* (* ?a ?b) ?c)" => "(* ?a (* ?b ?c))"),
         rewrite!("mul-1"; "(* ?a 1)" => "?a"),
 
-        rewrite!("div-associate"; "(* ?a (/ ?b ?c))" => "(/ (* ?a ?b) ?c)"),
+        rewrite!("div-associate"; "(* (/ ?a ?b) ?c)" => "(* ?a (/ ?c ?b))"),
         rewrite!("div-inv"; "(/ ?a ?a)" => "1"),
 
         rewrite!("add-mul-distribute"; "(+ (* ?a ?b) (* ?a ?c))" => "(* ?a (+ ?b ?c))"),
@@ -120,7 +122,7 @@ pub unsafe extern "C" fn egg_free_runner(_runner: Option<Box<Runner>>) {
 }
 
 #[no_mangle]
-pub extern "C" fn egg_simplify_expr(rules: Option<&RuleSet>, runner: Option<&mut Runner>, expr_str: *const c_char) {
+pub extern "C" fn egg_simplify_expr(rules: Option<&RuleSet>, runner: Option<&mut Runner>, expr_str: *const c_char) -> *mut c_char {
     let mut times = Vec::new();
 
     // parse the expression, the type annotation tells it which Language to use
@@ -139,10 +141,15 @@ pub extern "C" fn egg_simplify_expr(rules: Option<&RuleSet>, runner: Option<&mut
     let now = Instant::now();
     let rules = rules.unwrap();
     let runner = runner.unwrap();
+    //let egraph = runner.egraph.copy_without_unions(ConstantFold);
     let runner = Runner::default()
-    .with_time_limit(Duration::from_millis(500))
-    .with_expr(&expr).run(rules);
+    //    .with_egraph(egraph)
+        .with_time_limit(Duration::from_millis(100))
+        .with_iter_limit(10)
+        .with_node_limit(1000)
+        .with_expr(&expr).run(rules);
     times.push((now.elapsed(), "runner   "));
+    println!("{:?}", runner.stop_reason);
     //println!("{:?}", runner);
 
     // the Runner knows which e-class the expression given with `with_expr` is in
@@ -159,11 +166,12 @@ pub extern "C" fn egg_simplify_expr(rules: Option<&RuleSet>, runner: Option<&mut
     let (best_cost, best) = extractor.find_best(root);
     times.push((now.elapsed(), "best     "));
 
-    println!("### EGG | cost {} -> {} ###", cost, best_cost);
-    println!("[BEFORE] {}", expr);
-    println!("[AFTER ] {}", best);
+    println!("cost {} -> {}", cost, best_cost);
+    //println!("expr {}\n  -> {}", expr, best);
     times.sort_by(|(a,_), (b,_)| b.cmp(a));
     print!("{}", times.iter().fold(String::new(), |acc, (t,s)| acc + &format!("{}\t{:.2?}", s, t) + "\n"));
+
+    CString::new(best.to_string()).expect("return string error").into_raw()
 }
 
 
