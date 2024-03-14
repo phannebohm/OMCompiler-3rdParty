@@ -14,8 +14,8 @@ pub type Constant = NotNan<f64>;
 
 define_language! {
     pub enum ModelicaExpr {
+        Constant(Constant), // must be before Symbol, otherwise Constants are not recognized
         Symbol(Symbol),
-        Constant(Constant),
         "+" = Add([Id; 2]),
         "-" = Sub([Id; 2]),
         "*" = Mul([Id; 2]),
