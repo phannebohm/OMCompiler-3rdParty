@@ -88,6 +88,8 @@ pub extern "C" fn egg_make_rules() -> Box<RuleSet> {
         rewrite!("mul-same-base"; "(* ?a ?a)" => "(^ ?a 2)"),
         rewrite!("mul-same"; "(* ?a (^ ?a ?n))" => "(^ ?a (+ ?n 1))"),
 
+        rewrite!("pow-zero"; "(^ ?a 0)" => "1"),
+        rewrite!("pow-one"; "(^ 1 ?a)" => "1"),
         rewrite!("pow-distribute"; "(^ (* ?a ?b) ?n)" => "(* (^ ?a ?n) (^ ?b ?n))"),
 
         rewrite!("sin-0"; "(sin 0)" => "0"),
