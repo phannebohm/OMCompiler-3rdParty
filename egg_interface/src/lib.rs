@@ -1,21 +1,23 @@
 use std::ffi::{c_void, CStr, CString};
+use std::mem;
 use std::os::raw::c_char;
 use std::slice;
 use std::time::Duration;
 use std::time::Instant;
 use egg::*;
 use ordered_float::NotNan;
-use num_traits::Pow;
+use num_traits::{Pow, Zero};
+//use num_traits::real::Real;
 
 pub type EGraph = egg::EGraph<ModelicaExpr, ConstantFold>;
 pub type RuleSet = Vec<egg::Rewrite<ModelicaExpr, ConstantFold>>;
 pub type Runner = egg::Runner::<ModelicaExpr, ConstantFold, ()>;
+
+/// Constant needs to implement `Ord` so we can't just use `f64`
 pub type Constant = NotNan<f64>;
 
 define_language! {
     pub enum ModelicaExpr {
-        Constant(Constant), // must be before Symbol, otherwise Constants are not recognized
-        Symbol(Symbol),
         "+" = Add([Id; 2]),
         "-" = Sub([Id; 2]),
         "*" = Mul([Id; 2]),
@@ -23,6 +25,8 @@ define_language! {
         "^" = Pow([Id; 2]),
         "der" = Der(Id),
         "sin" = Sin(Id),
+        Constant(Constant),
+        Symbol(Symbol),
     }
 }
 
@@ -31,21 +35,23 @@ pub struct ConstantFold;
 impl Analysis<ModelicaExpr> for ConstantFold {
     type Data = Option<Constant>;
 
-    fn merge(&mut self, to: &mut Self::Data, from: Self::Data) -> DidMerge {
-        egg::merge_max(to, from)
-    }
-
     fn make(egraph: &EGraph, enode: &ModelicaExpr) -> Self::Data {
         let x = |i: &Id| egraph[*i].data;
         Some(match enode {
-            ModelicaExpr::Constant(n) => *n,
             ModelicaExpr::Add([a, b]) => x(a)? + x(b)?,
             ModelicaExpr::Sub([a, b]) => x(a)? - x(b)?,
             ModelicaExpr::Mul([a, b]) => x(a)? * x(b)?,
-            ModelicaExpr::Div([a, b]) if x(b) != Some(NotNan::new(0.0).unwrap()) => x(a)? / x(b)?,
-            ModelicaExpr::Pow([a, b]) => Pow::pow(x(a)?, x(b)?),
+            ModelicaExpr::Div([a, b]) if !x(b)?.is_zero() => x(a)? / x(b)?,
+            ModelicaExpr::Pow([a, b]) => x(a)?.pow(x(b)?),
+            ModelicaExpr::Der(a) if x(a).is_some() => Constant::zero(),
+            ModelicaExpr::Sin(a) if x(a).is_some() => NotNan::new(x(a)?.sin()).unwrap(),
+            ModelicaExpr::Constant(n) => *n,
             _ => return None,
         })
+    }
+
+    fn merge(&mut self, to: &mut Self::Data, from: Self::Data) -> DidMerge {
+        egg::merge_max(to, from)
     }
 
     fn modify(egraph: &mut EGraph, id: Id) {
@@ -94,8 +100,7 @@ pub extern "C" fn egg_make_rules() -> Box<RuleSet> {
 
         rewrite!("sin-0"; "(sin 0)" => "0"),
     ];
-    let elapsed = now.elapsed();
-    println!("made rules: {:.2?}", elapsed);
+    println!("made rules: {:.2?}", now.elapsed());
     Box::new(rules)
 }
 
@@ -108,13 +113,14 @@ pub unsafe extern "C" fn egg_free_rules(_rules: Option<Box<RuleSet>>) {
 /// make the runner
 #[no_mangle]
 pub extern "C" fn egg_make_runner() -> Box<Runner> {
-  let now = Instant::now();
-  let runner = Runner::default()
-    // we can load a saturated egraph here
-    .with_time_limit(Duration::from_millis(500));
-  let elapsed = now.elapsed();
-  println!("made runner: {:.2?}", elapsed);
-  Box::new(runner)
+    let now = Instant::now();
+    let runner = Runner::default()
+        // we can load a saturated egraph here
+        .with_iter_limit(10)
+        .with_node_limit(1000)
+        .with_time_limit(Duration::from_millis(500));
+    println!("made runner: {:.2?}", now.elapsed());
+    Box::new(runner)
 }
 
 #[no_mangle]
@@ -124,7 +130,7 @@ pub unsafe extern "C" fn egg_free_runner(_runner: Option<Box<Runner>>) {
 }
 
 #[no_mangle]
-pub extern "C" fn egg_simplify_expr(rules: Option<&RuleSet>, runner: Option<&mut Runner>, expr_str: *const c_char) -> *mut c_char {
+pub extern "C" fn egg_simplify_expr(rules: Option<&RuleSet>, runner_ptr: Option<&mut Runner>, expr_str: *const c_char) -> *mut c_char {
     let mut times = Vec::new();
 
     // parse the expression, the type annotation tells it which Language to use
@@ -139,24 +145,24 @@ pub extern "C" fn egg_simplify_expr(rules: Option<&RuleSet>, runner: Option<&mut
 
     // simplify the expression using a Runner, which creates an e-graph with
     // the given expression and runs the given rules over it
-    //println!("{:?}", runner0);
     let now = Instant::now();
-    let rules = rules.unwrap();
-    let runner = runner.unwrap();
-    //let egraph = runner.egraph.copy_without_unions(ConstantFold);
-    let runner = Runner::default()
-    //    .with_egraph(egraph)
-        .with_time_limit(Duration::from_millis(100))
-        .with_iter_limit(10)
-        .with_node_limit(1000)
-        .with_expr(&expr).run(rules);
+    // we need a variable for the unwrapped ptr so we can swap back at the end
+    let runner_ptr = runner_ptr.unwrap();
+    let mut runner: Runner = mem::replace(runner_ptr, *egg_make_runner());
+
+    // reset runner so it can run again
+    runner.stop_reason = None;
+
+    runner = runner.with_expr(&expr).run(rules.unwrap());
     times.push((now.elapsed(), "runner   "));
-    println!("{:?}", runner.stop_reason);
-    //println!("{:?}", runner);
+    match runner.stop_reason {
+        Some(ref reason) => println!("stop reason: {:?}", reason),
+        _ => ()
+    }
 
     // the Runner knows which e-class the expression given with `with_expr` is in
     let now = Instant::now();
-    let root = runner.roots[0];
+    let root = *runner.roots.last().unwrap();
     times.push((now.elapsed(), "root     "));
 
     // use an Extractor to pick the best element of the root eclass
@@ -168,10 +174,13 @@ pub extern "C" fn egg_simplify_expr(rules: Option<&RuleSet>, runner: Option<&mut
     let (best_cost, best) = extractor.find_best(root);
     times.push((now.elapsed(), "best     "));
 
-    println!("cost {} -> {}", cost, best_cost);
+    println!("cost: {} -> {}", cost, best_cost);
     //println!("expr {}\n  -> {}", expr, best);
     times.sort_by(|(a,_), (b,_)| b.cmp(a));
     print!("{}", times.iter().fold(String::new(), |acc, (t,s)| acc + &format!("{}\t{:.2?}", s, t) + "\n"));
+
+    // give runner back to metamodelica
+    mem::swap(runner_ptr, &mut runner);
 
     CString::new(best.to_string()).expect("return string error").into_raw()
 }
