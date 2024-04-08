@@ -35,8 +35,6 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(Corrosion)
 
 # egg
-corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/OMCompiler/3rdParty/egg/Cargo.toml)
-add_library(omc::3rd::egg ALIAS egg)
 corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/OMCompiler/3rdParty/egg_interface/Cargo.toml)
 add_library(omc::3rd::egg_interface ALIAS egg_interface)
 
