@@ -9,10 +9,12 @@ edition = "2021"
 crate-type = ["cdylib", "staticlib", "lib"] # cdylib needs to be first for api_test.rs
 
 [dependencies]
-egg = "0.9.3"
+egg = { version = "0.9.3", features = ["serde-1"] }
 log = "0.4.21"
 num-traits = "0.2.18"
-ordered-float = "4.2.0"
+ordered-float = { version = "4.2.0", features = ["serde"] }
+serde = "1.0.198"
+serde_json = "1.0.116"
 simple_logger = "4.3.3"
 
 [dev-dependencies]

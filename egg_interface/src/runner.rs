@@ -41,10 +41,10 @@ pub type Runner = egg::Runner::<ModelicaExpr, ConstantFold, ()>;
 
 /// Make the runner.
 pub fn make_runner(egraph: EGraph) -> Runner {
-    let size = egraph.total_size();
+    let size = std::cmp::max(egraph.total_size(), 500);
     Runner::default()
         .with_egraph(egraph)
         .with_iter_limit(10)
         .with_node_limit(size + 100)
-        .with_time_limit(Duration::from_millis(5))
+        .with_time_limit(Duration::from_millis(10))
 }

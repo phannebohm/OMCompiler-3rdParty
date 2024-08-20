@@ -39,6 +39,7 @@ use std::ffi::{CStr, CString};
 use std::mem;
 use std::os::raw::c_char;
 use std::time::{Duration, Instant};
+use std::fs::{File, OpenOptions};
 
 pub mod runner;
 
@@ -50,15 +51,39 @@ use crate::egraph::{EGraph, ModelicaExpr, ConstantFold};
 
 /// Make a new empty E-Graph
 #[no_mangle]
-pub extern "C" fn egg_make_egraph() -> Box<EGraph> {
+pub extern "C" fn egg_make_egraph(filename: *const c_char) -> Box<EGraph> {
     let now = Instant::now();
-    let egraph = EGraph::new(ConstantFold);
-    log::debug!("made egraph: {:.2?}", now.elapsed());
+    // Read the e-graph form file.
+    let filename = unsafe { CStr::from_ptr(filename).to_string_lossy().into_owned() };
+    let rdr = OpenOptions::new().read(true).open(filename).unwrap();
+    let mut egraph = match serde_json::from_reader::<File, EGraph>(rdr) {
+        Ok(egraph) => {
+            log::info!("loaded egraph: {:.2?}", now.elapsed());
+            egraph
+        },
+        Err(e) => {
+            log::warn!("error loading egraph: {:?}", e);
+            EGraph::new(ConstantFold)
+        }
+    };
+    egraph.rebuild();
     Box::new(egraph)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn egg_free_egraph(_egraph: Option<Box<EGraph>>) {
+pub unsafe extern "C" fn egg_free_egraph(egraph: Option<Box<EGraph>>) {
+    // save egraph to file
+    let writer = OpenOptions::new()
+        .create(true)
+        .truncate(true) // If the file already exists we want to overwrite the old data
+        .write(true)
+        .read(true)
+        .open("egraph.json")
+        .unwrap();
+    match serde_json::to_writer(writer, &egraph) {
+        Ok(_) => log::info!("saved egraph to \"egraph.json\""),
+        Err(_) => log::warn!("could not save egraph")
+    };
     // dropped implicitly
     log::debug!("dropped egraph");
 }
@@ -109,7 +134,7 @@ fn simplify_expr(egraph_ptr: &mut EGraph, rules: &RuleSet, expr: RecExpr<Modelic
     times.push((now.elapsed(), String::from("cost     ")));
 
     // we need a variable for the unwrapped ptr so we can swap back at the end
-    let egraph = mem::replace(egraph_ptr, *egg_make_egraph());
+    let egraph = mem::replace(egraph_ptr, EGraph::new(ConstantFold));
 
     // simplify the expression using a Runner,
     // which adds the given expression to the e-graph
@@ -128,7 +153,7 @@ fn simplify_expr(egraph_ptr: &mut EGraph, rules: &RuleSet, expr: RecExpr<Modelic
 
     let mut egraph = runner.egraph;
 
-    // use an Extractor to pick the best element of the root eclass
+    // use an Extractor to pick the best element of the root e-class
     let now = Instant::now();
     let extractor = Extractor::new(&egraph, AstSize);
     times.push((now.elapsed(), String::from("extractor")));

@@ -40,11 +40,11 @@ use ordered_float::NotNan;
 
 pub type EGraph = egg::EGraph<ModelicaExpr, ConstantFold>;
 
-
 /// Constant needs to implement `Ord` so we can't just use `f64`
 pub type Constant = NotNan<f64>;
 
 define_language! {
+    #[derive(serde::Serialize, serde::Deserialize)]
     pub enum ModelicaExpr {
         "+" = Add([Id; 2]),
         "-" = Sub([Id; 2]),
@@ -58,7 +58,7 @@ define_language! {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct ConstantFold;
 impl Analysis<ModelicaExpr> for ConstantFold {
     type Data = Option<Constant>;
